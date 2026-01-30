@@ -47,6 +47,10 @@ from libs.create_ml_io import CreateMLReader
 from libs.create_ml_io import JSON_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
+from libs.template_matching import TemplateMatchingEngine, Detection
+import cv2
+import numpy as np
+import subprocess
 
 __appname__ = 'labelImg'
 
@@ -180,6 +184,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self.file_dock.setObjectName(get_str('files'))
         self.file_dock.setWidget(file_list_container)
 
+        # Template Matching Dock Widget
+        self.template_engine = TemplateMatchingEngine()
+        self.template_engine.load_all_templates()
+        self._setup_template_matching_dock(get_str)
+
         self.zoom_widget = ZoomWidget()
         self.light_widget = LightWidget(get_str('lightWidgetTitle'))
         self.color_dialog = ColorDialog(parent=self)
@@ -207,7 +216,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.template_dock)
         self.file_dock.setFeatures(QDockWidget.DockWidgetFloatable)
+        self.template_dock.setFeatures(QDockWidget.DockWidgetFloatable)
 
         self.dock_features = QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetFloatable
         self.dock.setFeatures(self.dock.features() ^ self.dock_features)
@@ -811,6 +822,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.actions.edit.setEnabled(selected)
         self.actions.shapeLineColor.setEnabled(selected)
         self.actions.shapeFillColor.setEnabled(selected)
+        # Enable template save button when shape is selected
+        if hasattr(self, 'template_save_btn'):
+            self.template_save_btn.setEnabled(selected)
 
     def add_label(self, shape):
         shape.paint_label = self.display_label_option.isChecked()
@@ -1168,6 +1182,12 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.label_list.item(self.label_list.count() - 1).setSelected(True)
 
             self.canvas.setFocus(True)
+
+            # Enable template matching and trigger real-time matching if enabled
+            if hasattr(self, 'template_match_btn'):
+                self.template_match_btn.setEnabled(True)
+                self._trigger_realtime_matching()
+
             return True
         return False
 
@@ -1668,6 +1688,311 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def toggle_draw_square(self):
         self.canvas.set_drawing_shape_to_square(self.draw_squares_option.isChecked())
+
+    # ========== Template Matching Functions ==========
+
+    def _setup_template_matching_dock(self, get_str):
+        """Setup the template matching dock widget with controls"""
+        template_layout = QVBoxLayout()
+        template_layout.setContentsMargins(5, 5, 5, 5)
+        template_layout.setSpacing(8)
+
+        # Title label
+        title_label = QLabel("Template Matching")
+        title_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        template_layout.addWidget(title_label)
+
+        # Buttons row 1
+        btn_layout1 = QHBoxLayout()
+        self.template_folder_btn = QPushButton("Open Folder")
+        self.template_folder_btn.setToolTip("Open templates folder in file explorer")
+        self.template_folder_btn.clicked.connect(self.open_template_folder)
+        btn_layout1.addWidget(self.template_folder_btn)
+
+        self.template_save_btn = QPushButton("Save Template")
+        self.template_save_btn.setToolTip("Save selected bounding box as template")
+        self.template_save_btn.clicked.connect(self.save_template)
+        self.template_save_btn.setEnabled(False)
+        btn_layout1.addWidget(self.template_save_btn)
+        template_layout.addLayout(btn_layout1)
+
+        # Buttons row 2
+        btn_layout2 = QHBoxLayout()
+        self.template_match_btn = QPushButton("Run Matching")
+        self.template_match_btn.setToolTip("Execute template matching on current image")
+        self.template_match_btn.clicked.connect(self.run_template_matching)
+        self.template_match_btn.setEnabled(False)
+        btn_layout2.addWidget(self.template_match_btn)
+
+        self.realtime_matching_checkbox = QCheckBox("Real-time")
+        self.realtime_matching_checkbox.setToolTip("Automatically run matching when image changes")
+        self.realtime_matching_checkbox.stateChanged.connect(self.toggle_realtime_matching)
+        btn_layout2.addWidget(self.realtime_matching_checkbox)
+        template_layout.addLayout(btn_layout2)
+
+        # Separator
+        line1 = QFrame()
+        line1.setFrameShape(QFrame.HLine)
+        line1.setFrameShadow(QFrame.Sunken)
+        template_layout.addWidget(line1)
+
+        # Threshold slider
+        threshold_layout = QHBoxLayout()
+        threshold_label = QLabel("Match Threshold:")
+        threshold_layout.addWidget(threshold_label)
+        self.threshold_value_label = QLabel("0.80")
+        self.threshold_value_label.setMinimumWidth(35)
+        threshold_layout.addWidget(self.threshold_value_label)
+        template_layout.addLayout(threshold_layout)
+
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setMinimum(0)
+        self.threshold_slider.setMaximum(100)
+        self.threshold_slider.setValue(80)
+        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.threshold_slider.setTickInterval(10)
+        self.threshold_slider.valueChanged.connect(self._on_threshold_changed)
+        template_layout.addWidget(self.threshold_slider)
+
+        # Scale tolerance slider
+        scale_layout = QHBoxLayout()
+        scale_label = QLabel("Scale Tolerance:")
+        scale_layout.addWidget(scale_label)
+        self.scale_value_label = QLabel("20%")
+        self.scale_value_label.setMinimumWidth(35)
+        scale_layout.addWidget(self.scale_value_label)
+        template_layout.addLayout(scale_layout)
+
+        self.scale_slider = QSlider(Qt.Horizontal)
+        self.scale_slider.setMinimum(0)
+        self.scale_slider.setMaximum(100)
+        self.scale_slider.setValue(20)
+        self.scale_slider.setTickPosition(QSlider.TicksBelow)
+        self.scale_slider.setTickInterval(10)
+        self.scale_slider.valueChanged.connect(self._on_scale_changed)
+        template_layout.addWidget(self.scale_slider)
+
+        # Rotation tolerance slider
+        rotation_layout = QHBoxLayout()
+        rotation_label = QLabel("Rotation Tolerance:")
+        rotation_layout.addWidget(rotation_label)
+        self.rotation_value_label = QLabel("15")
+        self.rotation_value_label.setMinimumWidth(35)
+        rotation_layout.addWidget(self.rotation_value_label)
+        template_layout.addLayout(rotation_layout)
+
+        self.rotation_slider = QSlider(Qt.Horizontal)
+        self.rotation_slider.setMinimum(0)
+        self.rotation_slider.setMaximum(180)
+        self.rotation_slider.setValue(15)
+        self.rotation_slider.setTickPosition(QSlider.TicksBelow)
+        self.rotation_slider.setTickInterval(15)
+        self.rotation_slider.valueChanged.connect(self._on_rotation_changed)
+        template_layout.addWidget(self.rotation_slider)
+
+        # Template info label
+        self.template_info_label = QLabel("Templates: 0 classes")
+        self.template_info_label.setStyleSheet("color: gray; font-size: 10px;")
+        template_layout.addWidget(self.template_info_label)
+        self._update_template_info()
+
+        # Add stretch to push everything up
+        template_layout.addStretch()
+
+        # Create container and dock
+        template_container = QWidget()
+        template_container.setLayout(template_layout)
+
+        self.template_dock = QDockWidget("Template Matching", self)
+        self.template_dock.setObjectName("templateMatching")
+        self.template_dock.setWidget(template_container)
+
+        # Debounce timer for real-time matching
+        self._realtime_timer = QTimer()
+        self._realtime_timer.setSingleShot(True)
+        self._realtime_timer.timeout.connect(self._do_realtime_matching)
+
+    def _on_threshold_changed(self, value):
+        """Update threshold label when slider changes"""
+        self.threshold_value_label.setText(f"{value/100:.2f}")
+        self._trigger_realtime_matching()
+
+    def _on_scale_changed(self, value):
+        """Update scale label when slider changes"""
+        self.scale_value_label.setText(f"{value}%")
+        self._trigger_realtime_matching()
+
+    def _on_rotation_changed(self, value):
+        """Update rotation label when slider changes"""
+        self.rotation_value_label.setText(f"{value}")
+        self._trigger_realtime_matching()
+
+    def _trigger_realtime_matching(self):
+        """Trigger real-time matching with debounce"""
+        if self.realtime_matching_checkbox.isChecked() and self.file_path:
+            self._realtime_timer.start(300)  # 300ms debounce
+
+    def _do_realtime_matching(self):
+        """Execute real-time matching"""
+        if self.realtime_matching_checkbox.isChecked():
+            self.run_template_matching()
+
+    def _update_template_info(self):
+        """Update the template info label"""
+        classes = self.template_engine.get_template_classes()
+        total_templates = sum(len(self.template_engine.templates.get(c, [])) for c in classes)
+        self.template_info_label.setText(f"Templates: {len(classes)} classes, {total_templates} templates")
+
+    def open_template_folder(self):
+        """Open the templates folder in system file explorer"""
+        templates_dir = self.template_engine.templates_dir
+        if not os.path.exists(templates_dir):
+            os.makedirs(templates_dir)
+
+        # Open folder based on OS
+        if self.os_name == 'Windows':
+            os.startfile(templates_dir)
+        elif self.os_name == 'Darwin':  # macOS
+            subprocess.run(['open', templates_dir])
+        else:  # Linux
+            subprocess.run(['xdg-open', templates_dir])
+
+        self.statusBar().showMessage(f'Opened templates folder: {templates_dir}')
+
+    def save_template(self):
+        """Save the selected bounding box as a template"""
+        if not self.canvas.selected_shape:
+            QMessageBox.warning(self, "Warning", "Please select a bounding box first.")
+            return
+
+        shape = self.canvas.selected_shape
+        if not shape.label:
+            QMessageBox.warning(self, "Warning", "Selected shape has no label. Please assign a label first.")
+            return
+
+        # Get current image as numpy array
+        image_np = self._qimage_to_numpy(self.image)
+        if image_np is None:
+            QMessageBox.warning(self, "Warning", "Failed to convert image.")
+            return
+
+        try:
+            # Save template
+            filepath = self.template_engine.save_template(
+                image_np,
+                shape.points,
+                shape.label
+            )
+            self._update_template_info()
+            self.statusBar().showMessage(f'Template saved: {filepath}')
+            QMessageBox.information(self, "Success", f"Template saved for class '{shape.label}'")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save template: {str(e)}")
+
+    def run_template_matching(self):
+        """Run template matching on current image"""
+        if not self.file_path or self.image.isNull():
+            self.statusBar().showMessage('Please open an image first.')
+            return
+
+        # Check if templates exist
+        if not self.template_engine.templates:
+            self.template_engine.load_all_templates()
+            if not self.template_engine.templates:
+                self.statusBar().showMessage('No templates found. Save some templates first.')
+                return
+
+        # Get parameters from sliders
+        threshold = self.threshold_slider.value() / 100.0
+        scale_tolerance = self.scale_slider.value() / 100.0
+        rotation_tolerance = self.rotation_slider.value()
+
+        # Convert image to numpy
+        image_np = self._qimage_to_numpy(self.image)
+        if image_np is None:
+            self.statusBar().showMessage('Failed to process image.')
+            return
+
+        # Get existing bounding boxes
+        existing_boxes = self.canvas.shapes
+
+        self.statusBar().showMessage('Running template matching...')
+        QApplication.processEvents()
+
+        try:
+            # Run template matching
+            detections = self.template_engine.match_templates(
+                image_np,
+                threshold=threshold,
+                scale_tolerance=scale_tolerance,
+                rotation_tolerance=rotation_tolerance,
+                existing_boxes=existing_boxes
+            )
+
+            # Add detections as shapes
+            added_count = 0
+            for detection in detections:
+                # Create shape from detection
+                shape = Shape(label=detection.class_name)
+                for point in detection.to_points():
+                    shape.add_point(point)
+                shape.close()
+
+                # Set colors
+                color = generate_color_by_text(detection.class_name)
+                shape.line_color = color
+                shape.fill_color = color
+
+                # Add to canvas and label list
+                self.canvas.shapes.append(shape)
+                self.add_label(shape)
+                added_count += 1
+
+                # Add to label history if new
+                if detection.class_name not in self.label_hist:
+                    self.label_hist.append(detection.class_name)
+
+            if added_count > 0:
+                self.set_dirty()
+                self.canvas.update()
+
+            self.statusBar().showMessage(f'Template matching complete: {added_count} objects detected')
+
+        except Exception as e:
+            self.statusBar().showMessage(f'Template matching failed: {str(e)}')
+            print(f"Template matching error: {e}")
+
+    def toggle_realtime_matching(self, state):
+        """Toggle real-time matching mode"""
+        if state == Qt.Checked:
+            self.statusBar().showMessage('Real-time matching enabled')
+            if self.file_path:
+                self._trigger_realtime_matching()
+        else:
+            self.statusBar().showMessage('Real-time matching disabled')
+            self._realtime_timer.stop()
+
+    def _qimage_to_numpy(self, qimage):
+        """Convert QImage to numpy array (BGR format for OpenCV)"""
+        try:
+            # Convert to ARGB32 format for consistent handling
+            qimage = qimage.convertToFormat(QImage.Format_ARGB32)
+
+            width = qimage.width()
+            height = qimage.height()
+
+            ptr = qimage.bits()
+            if hasattr(ptr, 'setsize'):
+                ptr.setsize(height * width * 4)
+
+            arr = np.array(ptr).reshape(height, width, 4)
+
+            # Convert ARGB to BGR
+            bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+            return bgr
+        except Exception as e:
+            print(f"Error converting QImage to numpy: {e}")
+            return None
 
 def inverted(color):
     return QColor(*[255 - v for v in color.getRgb()])
