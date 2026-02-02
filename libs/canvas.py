@@ -29,6 +29,8 @@ class Canvas(QWidget):
     selectionChanged = pyqtSignal(bool)
     shapeMoved = pyqtSignal()
     drawingPolygon = pyqtSignal(bool)
+    deleteShapeRequest = pyqtSignal(object)  # Signal to request shape deletion
+    hideBoxesRequest = pyqtSignal(bool)  # Signal to hide/show boxes (backtick key)
 
     CREATE, EDIT = list(range(2))
 
@@ -75,6 +77,7 @@ class Canvas(QWidget):
 
     def enterEvent(self, ev):
         self.override_cursor(self._cursor)
+        self.setFocus()  # Get keyboard focus when mouse enters
 
     def leaveEvent(self, ev):
         self.restore_cursor()
@@ -635,6 +638,12 @@ class Canvas(QWidget):
             self.update()
         elif key == Qt.Key_Return and self.can_close_shape():
             self.finalise()
+        elif key == Qt.Key_Delete:
+            # Delete hovered shape (h_shape) or selected shape
+            if self.h_shape:
+                self.deleteShapeRequest.emit(self.h_shape)
+            elif self.selected_shape:
+                self.deleteShapeRequest.emit(self.selected_shape)
         elif key == Qt.Key_Left and self.selected_shape:
             self.move_one_pixel('Left')
         elif key == Qt.Key_Right and self.selected_shape:
@@ -643,6 +652,17 @@ class Canvas(QWidget):
             self.move_one_pixel('Up')
         elif key == Qt.Key_Down and self.selected_shape:
             self.move_one_pixel('Down')
+        elif key == Qt.Key_QuoteLeft:  # ` (backtick) key
+            if not ev.isAutoRepeat():
+                print("[Canvas] Backtick pressed - hiding boxes")
+                self.hideBoxesRequest.emit(True)
+
+    def keyReleaseEvent(self, ev):
+        key = ev.key()
+        if key == Qt.Key_QuoteLeft:  # ` (backtick) key
+            if not ev.isAutoRepeat():
+                print("[Canvas] Backtick released - showing boxes")
+                self.hideBoxesRequest.emit(False)
 
     def move_one_pixel(self, direction):
         # print(self.selectedShape.points)

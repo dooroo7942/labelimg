@@ -47,6 +47,9 @@ from libs.create_ml_io import CreateMLReader
 from libs.create_ml_io import JSON_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
+from libs.templateMatchingWidget import TemplateMatchingWidget
+from libs.template_matching import TemplateManager, TemplateMatcher, qimage_to_numpy
+from libs.labelListWidget import LabelListWidget
 
 __appname__ = 'labelImg'
 
@@ -153,7 +156,7 @@ class MainWindow(QMainWindow, WindowMixin):
         list_layout.addWidget(self.combo_box)
 
         # Create and add a widget for showing current label items
-        self.label_list = QListWidget()
+        self.label_list = LabelListWidget()  # Custom widget with Ctrl+A and Delete support
         label_list_container = QWidget()
         label_list_container.setLayout(list_layout)
         self.label_list.itemActivated.connect(self.label_selection_changed)
@@ -161,6 +164,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.label_list.itemDoubleClicked.connect(self.edit_label)
         # Connect to itemChanged to detect checkbox changes.
         self.label_list.itemChanged.connect(self.label_item_changed)
+        self.label_list.deleteSelectedRequested.connect(self.delete_selected_labels)  # Delete key handler
         list_layout.addWidget(self.label_list)
 
 
@@ -179,6 +183,25 @@ class MainWindow(QMainWindow, WindowMixin):
         self.file_dock = QDockWidget(get_str('fileList'), self)
         self.file_dock.setObjectName(get_str('files'))
         self.file_dock.setWidget(file_list_container)
+
+        # Template Matching Dock Widget
+        self.template_matching_widget = TemplateMatchingWidget(self)
+        self.template_dock = QDockWidget('Template Matching', self)
+        self.template_dock.setObjectName('templateMatching')
+        self.template_dock.setWidget(self.template_matching_widget)
+
+        # Initialize template manager and matcher
+        self.template_base_dir = os.path.join(os.path.dirname(__file__), 'data', 'templates')
+        self.template_manager = TemplateManager(self.template_base_dir)
+        self.template_matcher = TemplateMatcher(threshold=0.8, scale_tolerance=0.2, rotation_tolerance=15)
+
+        # Connect template matching signals
+        self.template_matching_widget.saveTemplateRequested.connect(self.save_selected_as_template)
+        self.template_matching_widget.openTemplateFolderRequested.connect(self.open_template_folder)
+        self.template_matching_widget.matchingRequested.connect(self.run_template_matching)
+        self.template_matching_widget.parametersChanged.connect(self.update_template_matcher_params)
+        self.template_matching_widget.realtimeModeChanged.connect(self.on_realtime_mode_changed)
+        self.template_matching_widget.hideBoxesRequested.connect(self.toggle_boxes_visibility)
 
         self.zoom_widget = ZoomWidget()
         self.light_widget = LightWidget(get_str('lightWidgetTitle'))
@@ -203,11 +226,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.shapeMoved.connect(self.set_dirty)
         self.canvas.selectionChanged.connect(self.shape_selection_changed)
         self.canvas.drawingPolygon.connect(self.toggle_drawing_sensitive)
+        self.canvas.deleteShapeRequest.connect(self.delete_shape_by_request)
+        self.canvas.hideBoxesRequest.connect(self.toggle_boxes_visibility)
 
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.template_dock)
         self.file_dock.setFeatures(QDockWidget.DockWidgetFloatable)
+        self.template_dock.setFeatures(QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
 
         self.dock_features = QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetFloatable
         self.dock.setFeatures(self.dock.features() ^ self.dock_features)
@@ -291,7 +318,7 @@ class MainWindow(QMainWindow, WindowMixin):
                           'Ctrl+H', 'hide', get_str('hideAllBoxDetail'),
                           enabled=False)
         show_all = action(get_str('showAllBox'), partial(self.toggle_polygons, True),
-                          'Ctrl+A', 'hide', get_str('showAllBoxDetail'),
+                          'Ctrl+Shift+A', 'hide', get_str('showAllBoxDetail'),
                           enabled=False)
 
         help_default = action(get_str('tutorialDefault'), self.show_default_tutorial_dialog, None, 'help', get_str('tutorialDetail'))
@@ -811,6 +838,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.actions.edit.setEnabled(selected)
         self.actions.shapeLineColor.setEnabled(selected)
         self.actions.shapeFillColor.setEnabled(selected)
+        # Enable template save button if any shapes exist
+        self.template_matching_widget.set_save_template_enabled(len(self.canvas.shapes) > 0)
 
     def add_label(self, shape):
         shape.paint_label = self.display_label_option.isChecked()
@@ -824,6 +853,8 @@ class MainWindow(QMainWindow, WindowMixin):
         for action in self.actions.onShapesPresent:
             action.setEnabled(True)
         self.update_combo_box()
+        # Update template save button
+        self.template_matching_widget.set_save_template_enabled(len(self.canvas.shapes) > 0)
 
     def remove_label(self, shape):
         if shape is None:
@@ -1168,6 +1199,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.label_list.item(self.label_list.count() - 1).setSelected(True)
 
             self.canvas.setFocus(True)
+            # Enable template matching if templates exist
+            self.template_matching_widget.set_matching_enabled(True)
+            # Trigger real-time matching if enabled
+            self.template_matching_widget.trigger_realtime_match_if_enabled()
             return True
         return False
 
@@ -1241,6 +1276,40 @@ class MainWindow(QMainWindow, WindowMixin):
         # The epsilon does not seem to work too well here.
         w = self.centralWidget().width() - 2.0
         return w / self.canvas.pixmap.width()
+
+    def delete_selected_labels(self):
+        """Delete all selected labels in the label list"""
+        print("[delete_selected_labels] Called")
+        selected_items = self.label_list.selectedItems()
+        print(f"[delete_selected_labels] Selected items: {len(selected_items)}")
+        if not selected_items:
+            return
+
+        # Collect shapes to delete
+        shapes_to_delete = []
+        for item in selected_items:
+            if item in self.items_to_shapes:
+                shapes_to_delete.append(self.items_to_shapes[item])
+
+        print(f"[delete_selected_labels] Shapes to delete: {len(shapes_to_delete)}")
+
+        # Delete shapes
+        for shape in shapes_to_delete:
+            if shape in self.canvas.shapes:
+                self.canvas.shapes.remove(shape)
+            self.remove_label(shape)
+            if self.canvas.selected_shape == shape:
+                self.canvas.selected_shape = None
+
+        self.set_dirty()
+        self.canvas.update()
+
+        if self.no_shapes():
+            for action in self.actions.onShapesPresent:
+                action.setEnabled(False)
+
+        # Update template save button
+        self.template_matching_widget.set_save_template_enabled(len(self.canvas.shapes) > 0)
 
     def closeEvent(self, event):
         if not self.may_continue():
@@ -1572,11 +1641,41 @@ class MainWindow(QMainWindow, WindowMixin):
             self.set_dirty()
 
     def delete_selected_shape(self):
+        # Check if label_list has focus and multiple items selected
+        if self.label_list.hasFocus() and len(self.label_list.selectedItems()) > 0:
+            print("[delete_selected_shape] Label list has focus, calling delete_selected_labels")
+            self.delete_selected_labels()
+            return
+
         self.remove_label(self.canvas.delete_selected())
         self.set_dirty()
         if self.no_shapes():
             for action in self.actions.onShapesPresent:
                 action.setEnabled(False)
+        # Update template save button
+        self.template_matching_widget.set_save_template_enabled(len(self.canvas.shapes) > 0)
+
+    def delete_shape_by_request(self, shape):
+        """Delete a specific shape (called when Delete key pressed on hovered shape)"""
+        if shape is None:
+            return
+        # Remove from canvas
+        if shape in self.canvas.shapes:
+            self.canvas.shapes.remove(shape)
+        # Clear highlight
+        self.canvas.un_highlight(shape)
+        # Remove label
+        self.remove_label(shape)
+        # Clear selection if this was selected
+        if self.canvas.selected_shape == shape:
+            self.canvas.selected_shape = None
+        self.set_dirty()
+        self.canvas.update()
+        if self.no_shapes():
+            for action in self.actions.onShapesPresent:
+                action.setEnabled(False)
+        # Update template save button
+        self.template_matching_widget.set_save_template_enabled(len(self.canvas.shapes) > 0)
 
     def choose_shape_line_color(self):
         color = self.color_dialog.getColor(self.line_color, u'Choose Line Color',
@@ -1668,6 +1767,199 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def toggle_draw_square(self):
         self.canvas.set_drawing_shape_to_square(self.draw_squares_option.isChecked())
+
+    # Template Matching Functions
+    def save_selected_as_template(self):
+        """Save ALL bounding boxes as templates (each to its class folder)"""
+        if self.image.isNull():
+            QMessageBox.warning(self, 'Warning', 'No image loaded.')
+            return
+
+        shapes = self.canvas.shapes
+        if not shapes:
+            QMessageBox.warning(self, 'Warning', 'No bounding boxes found. Please create bounding boxes first.')
+            return
+
+        # Convert QImage to numpy array once
+        try:
+            image_np = qimage_to_numpy(self.image)
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to convert image: {str(e)}')
+            return
+
+        saved_count = 0
+        skipped_count = 0
+
+        for shape in shapes:
+            # Skip shapes created by template matching (only save manual annotations)
+            if getattr(shape, 'from_template_matching', False):
+                print(f'[Template] Skipping (from_template_matching): {shape.label}')
+                skipped_count += 1
+                continue
+
+            # Skip shapes that already have template saved
+            if getattr(shape, 'template_saved', False):
+                print(f'[Template] Skipping (already saved): {shape.label}')
+                skipped_count += 1
+                continue
+
+            label = shape.label
+            if not label:
+                skipped_count += 1
+                continue
+
+            # Get bounding box coordinates
+            rect = shape.bounding_rect()
+            x = int(rect.x())
+            y = int(rect.y())
+            w = int(rect.width())
+            h = int(rect.height())
+
+            if w <= 0 or h <= 0:
+                skipped_count += 1
+                continue
+
+            # Save template to class folder
+            try:
+                filepath = self.template_manager.save_template(image_np, label, (x, y, w, h))
+                if filepath:
+                    saved_count += 1
+                    shape.template_saved = True  # Mark as saved
+                    print(f'[Template] Saved: {filepath}')
+                else:
+                    skipped_count += 1
+            except Exception as e:
+                print(f'[Template] Failed to save {label}: {str(e)}')
+                skipped_count += 1
+
+        # Show result
+        msg = f'Saved {saved_count} templates'
+        if skipped_count > 0:
+            msg += f' (skipped {skipped_count})'
+
+        self.template_matching_widget.set_status(msg)
+        self.statusBar().showMessage(msg, 5000)
+
+        if saved_count > 0:
+            QMessageBox.information(self, 'Success', msg)
+
+    def open_template_folder(self):
+        """Open the templates images folder in file explorer"""
+        images_folder = self.template_manager.images_dir
+        if not os.path.exists(images_folder):
+            os.makedirs(images_folder)
+
+        # Open folder based on OS
+        if self.os_name == 'Windows':
+            os.startfile(images_folder)
+        elif self.os_name == 'Darwin':  # macOS
+            import subprocess
+            subprocess.Popen(['open', images_folder])
+        else:  # Linux
+            import subprocess
+            subprocess.Popen(['xdg-open', images_folder])
+
+        self.statusBar().showMessage(f'Opened template folder: {self.template_base_dir}')
+
+    def run_template_matching(self):
+        """Run template matching on the current image"""
+        if self.image.isNull():
+            self.template_matching_widget.set_status('No image loaded')
+            return
+
+        # Get all templates
+        templates = self.template_manager.get_all_templates()
+        if not templates:
+            self.template_matching_widget.set_status('No templates found')
+            return
+
+        # Convert QImage to numpy array
+        try:
+            image_np = qimage_to_numpy(self.image)
+        except Exception as e:
+            self.template_matching_widget.set_status(f'Error: {str(e)}')
+            return
+
+        # Get existing bounding boxes to avoid overlap
+        existing_boxes = []
+        for shape in self.canvas.shapes:
+            rect = shape.bounding_rect()
+            existing_boxes.append((int(rect.x()), int(rect.y()),
+                                   int(rect.width()), int(rect.height())))
+
+        # Run matching
+        self.template_matching_widget.set_status('Matching...')
+        QApplication.processEvents()
+
+        try:
+            matches = self.template_matcher.match_all_templates(image_np, templates, existing_boxes)
+        except Exception as e:
+            self.template_matching_widget.set_status(f'Error: {str(e)}')
+            return
+
+        if not matches:
+            self.template_matching_widget.set_status('No matches found')
+            return
+
+        # Add matched regions as shapes
+        added_count = 0
+        for x, y, w, h, class_name, confidence in matches:
+            # Create shape with template matching flag
+            shape = Shape(label=class_name, from_template_matching=True)
+            shape.add_point(QPointF(x, y))
+            shape.add_point(QPointF(x + w, y))
+            shape.add_point(QPointF(x + w, y + h))
+            shape.add_point(QPointF(x, y + h))
+            shape.close()
+
+            # Set colors
+            color = generate_color_by_text(class_name)
+            shape.line_color = color
+            shape.fill_color = color
+
+            # Add to canvas
+            self.canvas.shapes.append(shape)
+            self.add_label(shape)
+            added_count += 1
+
+            # Add label to history if not present
+            if class_name not in self.label_hist:
+                self.label_hist.append(class_name)
+
+        if added_count > 0:
+            self.set_dirty()
+            self.canvas.update()
+
+        self.template_matching_widget.set_status(f'Found {added_count} matches')
+        self.statusBar().showMessage(f'Template matching: {added_count} objects detected')
+
+    def update_template_matcher_params(self, threshold, scale_tolerance, rotation_tolerance):
+        """Update template matcher parameters"""
+        self.template_matcher.set_parameters(
+            threshold=threshold,
+            scale_tolerance=scale_tolerance,
+            rotation_tolerance=rotation_tolerance
+        )
+
+    def on_realtime_mode_changed(self, enabled):
+        """Handle real-time mode change"""
+        if enabled and not self.image.isNull():
+            self.run_template_matching()
+
+    def toggle_boxes_visibility(self, hide):
+        """Toggle bounding boxes visibility (hide when button pressed, show when released)"""
+        print(f"[toggle_boxes_visibility] hide={hide}, shapes count={len(self.canvas.shapes)}")
+        if hide:
+            # Hide all shapes temporarily
+            for shape in self.canvas.shapes:
+                self.canvas.visible[shape] = False
+            print("[toggle_boxes_visibility] All shapes hidden")
+        else:
+            # Show all shapes again
+            for shape in self.canvas.shapes:
+                self.canvas.visible[shape] = True
+            print("[toggle_boxes_visibility] All shapes shown")
+        self.canvas.repaint()  # Force immediate repaint
 
 def inverted(color):
     return QColor(*[255 - v for v in color.getRgb()])

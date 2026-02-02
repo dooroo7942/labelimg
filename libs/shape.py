@@ -38,13 +38,15 @@ class Shape(object):
     scale = 1.0
     label_font_size = 8
 
-    def __init__(self, label=None, line_color=None, difficult=False, paint_label=False):
+    def __init__(self, label=None, line_color=None, difficult=False, paint_label=False, from_template_matching=False):
         self.label = label
         self.points = []
         self.fill = False
         self.selected = False
         self.difficult = difficult
         self.paint_label = paint_label
+        self.from_template_matching = from_template_matching  # Flag: created by template matching
+        self.template_saved = False  # Flag: template already saved for this shape
 
         self._highlight_index = None
         self._highlight_mode = self.NEAR_VERTEX
