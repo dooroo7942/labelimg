@@ -50,6 +50,8 @@ from libs.hashableQListWidgetItem import HashableQListWidgetItem
 from libs.templateMatchingWidget import TemplateMatchingWidget
 from libs.template_matching import TemplateManager, TemplateMatcher, qimage_to_numpy
 from libs.labelListWidget import LabelListWidget
+from libs.yolo_detector import YoloDetector, check_yolo_available
+from libs.pretrainDialog import PretrainDialog
 
 __appname__ = 'labelImg'
 
@@ -202,6 +204,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.template_matching_widget.parametersChanged.connect(self.update_template_matcher_params)
         self.template_matching_widget.realtimeModeChanged.connect(self.on_realtime_mode_changed)
         self.template_matching_widget.hideBoxesRequested.connect(self.toggle_boxes_visibility)
+
+        # Connect YOLO signals
+        self.template_matching_widget.pretrainRequested.connect(self.open_pretrain_dialog)
+        self.template_matching_widget.runYoloRequested.connect(self.run_yolo_detection)
+
+        # YOLO detector
+        self.yolo_detector = None
 
         self.zoom_widget = ZoomWidget()
         self.light_widget = LightWidget(get_str('lightWidgetTitle'))
@@ -1445,6 +1454,9 @@ class MainWindow(QMainWindow, WindowMixin):
             item = QListWidgetItem(imgPath)
             self.file_list_widget.addItem(item)
 
+        # Check for YOLO model
+        self.check_yolo_model()
+
     def verify_image(self, _value=False):
         # Proceeding next image without dialog if having any label
         if self.file_path is not None:
@@ -1963,6 +1975,111 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.canvas.visible[shape] = True
             print("[toggle_boxes_visibility] All shapes shown")
         self.canvas.repaint()  # Force immediate repaint
+
+    # ==================== YOLO Functions ====================
+
+    def open_pretrain_dialog(self):
+        """Open the YOLO pretrain dialog"""
+        if not self.dir_name:
+            QMessageBox.warning(self, "Warning", "이미지 폴더를 먼저 열어주세요.")
+            return
+
+        classes_file = os.path.join(self.dir_name, "classes.txt")
+        if not os.path.exists(classes_file):
+            QMessageBox.warning(self, "Warning",
+                                "classes.txt 파일이 없습니다.\n"
+                                "YOLO 형식으로 라벨링을 먼저 진행해주세요.")
+            return
+
+        dialog = PretrainDialog(self, self.dir_name, classes_file)
+        dialog.exec_()
+
+        # After training, check if model exists and enable YOLO button
+        self.check_yolo_model()
+
+    def check_yolo_model(self):
+        """Check if YOLO model exists and enable/disable button"""
+        if not self.dir_name:
+            return
+
+        pretrain_dir = os.path.join(os.path.dirname(self.dir_name), "Pretrain")
+        model_path = os.path.join(pretrain_dir, "best.pt")
+
+        if os.path.exists(model_path):
+            if self.yolo_detector is None:
+                self.yolo_detector = YoloDetector(model_path)
+            elif self.yolo_detector.model_path != model_path:
+                self.yolo_detector.load_model(model_path)
+
+            self.template_matching_widget.set_yolo_enabled(True)
+            self.template_matching_widget.set_status(f"YOLO model loaded")
+        else:
+            self.template_matching_widget.set_yolo_enabled(False)
+
+    def run_yolo_detection(self):
+        """Run YOLO detection on current image"""
+        if not self.yolo_detector or not self.yolo_detector.is_model_loaded():
+            QMessageBox.warning(self, "Warning",
+                                "YOLO 모델이 로드되지 않았습니다.\n"
+                                "Pretrain 버튼을 눌러 모델을 먼저 학습해주세요.")
+            return
+
+        if self.file_path is None or self.image.isNull():
+            self.template_matching_widget.set_status("No image loaded")
+            return
+
+        self.template_matching_widget.set_status("Running YOLO detection...")
+        QApplication.processEvents()
+
+        try:
+            # Clear existing shapes
+            self.canvas.shapes = []
+            self.label_list.clear()
+            self.items_to_shapes.clear()
+            self.shapes_to_items.clear()
+
+            # Run detection
+            threshold = self.template_matching_widget.get_parameters()['threshold']
+            detections = self.yolo_detector.detect(self.file_path, conf_threshold=threshold)
+
+            if not detections:
+                self.template_matching_widget.set_status("No objects detected")
+                self.canvas.update()
+                return
+
+            # Add detected shapes
+            added_count = 0
+            for class_name, x, y, w, h, conf in detections:
+                shape = Shape(label=class_name)
+                shape.add_point(QPointF(x, y))
+                shape.add_point(QPointF(x + w, y))
+                shape.add_point(QPointF(x + w, y + h))
+                shape.add_point(QPointF(x, y + h))
+                shape.close()
+
+                # Set color based on class
+                color = get_line_color_for_class(class_name)
+                shape.line_color = color
+                shape.fill_color = color
+
+                self.canvas.shapes.append(shape)
+                self.add_label(shape)
+                added_count += 1
+
+                if class_name not in self.label_hist:
+                    self.label_hist.append(class_name)
+
+            if added_count > 0:
+                self.set_dirty()
+                self.canvas.update()
+
+            self.template_matching_widget.set_status(f"YOLO: {added_count} objects detected")
+            self.statusBar().showMessage(f"YOLO detection: {added_count} objects found")
+
+        except Exception as e:
+            self.template_matching_widget.set_status(f"Error: {str(e)}")
+            QMessageBox.critical(self, "YOLO Error", str(e))
+
 
 def inverted(color):
     return QColor(*[255 - v for v in color.getRgb()])
