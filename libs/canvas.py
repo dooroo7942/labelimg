@@ -622,11 +622,13 @@ class Canvas(QWidget):
         mods = ev.modifiers()
         if int(Qt.ControlModifier) | int(Qt.ShiftModifier) == int(mods) and v_delta:
             self.lightRequest.emit(v_delta)
-        elif Qt.ControlModifier == int(mods) and v_delta:
-            self.zoomRequest.emit(v_delta)
-        else:
+        elif Qt.ShiftModifier == int(mods) and v_delta:
+            # Shift + 휠: 스크롤
             v_delta and self.scrollRequest.emit(v_delta, Qt.Vertical)
             h_delta and self.scrollRequest.emit(h_delta, Qt.Horizontal)
+        elif v_delta:
+            # 휠만: 줌 (Ctrl 없이도 동작)
+            self.zoomRequest.emit(v_delta)
         ev.accept()
 
     def keyPressEvent(self, ev):
