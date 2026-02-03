@@ -34,7 +34,7 @@ class Shape(object):
     vertex_fill_color = DEFAULT_VERTEX_FILL_COLOR
     h_vertex_fill_color = DEFAULT_HVERTEX_FILL_COLOR
     point_type = P_ROUND
-    point_size = 16
+    point_size = 8  # 꼭지점 크기 축소 (16 -> 8)
     scale = 1.0
     label_font_size = 8
 
@@ -111,7 +111,10 @@ class Shape(object):
 
             painter.drawPath(line_path)
             painter.drawPath(vertex_path)
-            painter.fillPath(vertex_path, self.vertex_fill_color)
+            # 꼭지점 색상을 바운딩 박스 색상과 동일하게 (불투명)
+            vertex_color = QColor(self.line_color)
+            vertex_color.setAlpha(255)  # 완전 불투명
+            painter.fillPath(vertex_path, vertex_color)
 
             # Draw text at the top-left
             if self.paint_label:
