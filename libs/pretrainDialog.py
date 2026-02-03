@@ -15,7 +15,7 @@ except ImportError:
     from PyQt4.QtGui import *
     from PyQt4.QtCore import *
 
-from libs.yolo_detector import YoloDetector, check_yolo_available
+from libs.yolo_detector import YoloDetector, check_yolo_available, _check_yolo
 
 
 class PretrainDialog(QDialog):

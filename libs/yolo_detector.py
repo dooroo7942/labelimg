@@ -9,12 +9,22 @@ import os
 import shutil
 from pathlib import Path
 
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    YOLO_AVAILABLE = False
-    print("Warning: ultralytics not installed. Run 'pip install ultralytics' for YOLO support.")
+# Lazy import for ultralytics to avoid import errors when not needed
+YOLO = None
+YOLO_AVAILABLE = None
+
+def _check_yolo():
+    """Lazy check for YOLO availability"""
+    global YOLO, YOLO_AVAILABLE
+    if YOLO_AVAILABLE is None:
+        try:
+            from ultralytics import YOLO as _YOLO
+            YOLO = _YOLO
+            YOLO_AVAILABLE = True
+        except (ImportError, OSError) as e:
+            YOLO_AVAILABLE = False
+            print(f"Warning: ultralytics not available. {str(e)}")
+    return YOLO_AVAILABLE
 
 
 class YoloDetector:
@@ -30,8 +40,8 @@ class YoloDetector:
 
     def load_model(self, model_path):
         """Load a trained YOLO model"""
-        if not YOLO_AVAILABLE:
-            raise RuntimeError("ultralytics not installed")
+        if not _check_yolo():
+            raise RuntimeError("ultralytics not available")
 
         if os.path.exists(model_path):
             self.model = YOLO(model_path)
@@ -168,8 +178,8 @@ class YoloDetector:
         Train YOLOv8 model
         Returns path to best.pt
         """
-        if not YOLO_AVAILABLE:
-            raise RuntimeError("ultralytics not installed. Run 'pip install ultralytics'")
+        if not _check_yolo():
+            raise RuntimeError("ultralytics not available. Run 'pip install ultralytics'")
 
         # Start with pretrained YOLOv8n (nano - fastest)
         model = YOLO('yolov8n.pt')
@@ -193,4 +203,4 @@ class YoloDetector:
 
 def check_yolo_available():
     """Check if YOLO is available"""
-    return YOLO_AVAILABLE
+    return _check_yolo()
