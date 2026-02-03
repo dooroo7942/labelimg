@@ -885,12 +885,12 @@ class MainWindow(QMainWindow, WindowMixin):
             if line_color:
                 shape.line_color = QColor(*line_color)
             else:
-                shape.line_color = generate_color_by_text(label)
+                shape.line_color = get_line_color_for_class(label)
 
             if fill_color:
                 shape.fill_color = QColor(*fill_color)
             else:
-                shape.fill_color = generate_color_by_text(label)
+                shape.fill_color = get_line_color_for_class(label)
 
             self.add_label(shape)
         self.update_combo_box()
@@ -980,7 +980,7 @@ class MainWindow(QMainWindow, WindowMixin):
         label = item.text()
         if label != shape.label:
             shape.label = item.text()
-            shape.line_color = generate_color_by_text(shape.label)
+            shape.line_color = get_line_color_for_class(shape.label)
             self.set_dirty()
         else:  # User probably changed item visibility
             self.canvas.set_shape_visible(shape, item.checkState() == Qt.Checked)
@@ -1009,8 +1009,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.diffc_button.setChecked(False)
         if text is not None:
             self.prev_label_text = text
-            generate_color = generate_color_by_text(text)
-            shape = self.canvas.set_last_label(text, generate_color, generate_color)
+            line_color = get_line_color_for_class(text)
+            shape = self.canvas.set_last_label(text, line_color, line_color)
             self.add_label(shape)
             if self.beginner():  # Switch to edit mode.
                 self.canvas.set_editing(True)
@@ -1714,6 +1714,9 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.label_hist = [line]
                     else:
                         self.label_hist.append(line)
+            # 클래스 목록을 utils에 설정하여 색상 매핑에 사용
+            from libs.utils import set_class_list
+            set_class_list(self.label_hist)
 
     def load_pascal_xml_by_filename(self, xml_path):
         if self.file_path is None:
@@ -1913,7 +1916,7 @@ class MainWindow(QMainWindow, WindowMixin):
             shape.close()
 
             # Set colors
-            color = generate_color_by_text(class_name)
+            color = get_line_color_for_class(class_name)
             shape.line_color = color
             shape.fill_color = color
 

@@ -79,13 +79,51 @@ def format_shortcut(text):
     return '<b>%s</b>+<b>%s</b>' % (mod, key)
 
 
-def generate_color_by_text(text):
+# 클래스 인덱스 기반 색상 (빨주노초파남보 순서) - 연한 버전
+CLASS_COLORS = [
+    (255, 100, 100),   # 빨강 (연한)
+    (255, 180, 100),   # 주황 (연한)
+    (255, 255, 100),   # 노랑 (연한)
+    (100, 255, 100),   # 초록 (연한)
+    (100, 180, 255),   # 파랑 (연한)
+    (100, 100, 255),   # 남색 (연한)
+    (200, 100, 255),   # 보라 (연한)
+]
+
+# 클래스 목록을 저장할 전역 변수
+_class_list = []
+
+def set_class_list(class_list):
+    """클래스 목록 설정 (labelImg.py에서 호출)"""
+    global _class_list
+    _class_list = list(class_list) if class_list else []
+
+def get_color_for_class(class_name, alpha=100):
+    """클래스 이름에 따른 색상 반환 (인덱스 기반)"""
+    global _class_list
+    if class_name in _class_list:
+        idx = _class_list.index(class_name)
+        r, g, b = CLASS_COLORS[idx % len(CLASS_COLORS)]
+        return QColor(r, g, b, alpha)
+    # 클래스 목록에 없으면 해시 기반 색상 사용
+    return generate_color_by_text_hash(class_name, alpha)
+
+def generate_color_by_text_hash(text, alpha=100):
+    """텍스트 해시 기반 색상 생성 (기존 방식)"""
     s = ustr(text)
     hash_code = int(hashlib.sha256(s.encode('utf-8')).hexdigest(), 16)
     r = int((hash_code / 255) % 255)
     g = int((hash_code / 65025) % 255)
     b = int((hash_code / 16581375) % 255)
-    return QColor(r, g, b, 100)
+    return QColor(r, g, b, alpha)
+
+def generate_color_by_text(text):
+    """라벨 리스트 배경색용 (연한 색상)"""
+    return get_color_for_class(text, alpha=100)
+
+def get_line_color_for_class(class_name):
+    """바운딩 박스용 색상 (더 진한 색상)"""
+    return get_color_for_class(class_name, alpha=200)
 
 
 def have_qstring():
